@@ -15,6 +15,8 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
+// Context is currently unused, since we don't really need to short-circuit
+// any async calls. For now, we'll tie it to a single global root.
 var (
 	ctx = context.Background()
 )
@@ -26,18 +28,27 @@ type azureSession struct {
 	Authorizer        *autorest.Authorizer
 }
 
+// Attaches the session's authorizer to a new instance of the VM Scale Set client
 func (s *azureSession) getVMSSClient() compute.VirtualMachineScaleSetsClient {
 	client := compute.NewVirtualMachineScaleSetsClient(s.SubscriptionID)
 	client.Authorizer = *s.Authorizer
 	return client
 }
 
+// Attaches the session's authorizer to a new instance of the VMSS VM client
 func (s *azureSession) getVMSSVMClient() compute.VirtualMachineScaleSetVMsClient {
 	client := compute.NewVirtualMachineScaleSetVMsClient(s.SubscriptionID)
 	client.Authorizer = *s.Authorizer
 	return client
 }
 
+// Iterates through the instances within a Scale Set. If 'protect' is true,
+// we apply scale-in protection to any instances which are the latest model
+// (created using the most recent VMSS configuration). When false, we remove
+// protection from all instances.
+//
+// Returns a slice of futures, which we can optionally await to block further
+// operations until we know the operations have completed.
 func (s *azureSession) setVMProtection(protect bool) ([]compute.VirtualMachineScaleSetVMsUpdateFuture, error) {
 	var futures []compute.VirtualMachineScaleSetVMsUpdateFuture
 	var filter string
@@ -83,6 +94,10 @@ func (s *azureSession) setVMProtection(protect bool) ([]compute.VirtualMachineSc
 	return futures, nil
 }
 
+// Helper function, accepts a slice of VMSS VM Update futures and
+// spawns a goroutine to poll for success on each. Upon completion
+// of each, logs the modified VM's resource name. Upon completion
+// of all futures, returns.
 func (s *azureSession) awaitVMFutures(futures []compute.VirtualMachineScaleSetVMsUpdateFuture) error {
 	var wg sync.WaitGroup
 
@@ -113,6 +128,11 @@ func (s *azureSession) awaitVMFutures(futures []compute.VirtualMachineScaleSetVM
 	return nil
 }
 
+// Adjusts the desired capacity of the chosen scale set by a given factor.
+// Blocks execution until all VMSS instances have reported success.
+//
+// Instances will not report success until VM Extensions scripts have returned
+// with an exit code of 0.
 func (s *azureSession) scaleVMSSByFactor(factor float64) error {
 	client := s.getVMSSClient()
 
@@ -150,6 +170,9 @@ func (s *azureSession) scaleVMSSByFactor(factor float64) error {
 	return nil
 }
 
+// Initializes a new azureSession struct. Mostly used to get
+// rid of unnecessary variable passing and allow the chosen
+// authorizer to be easily replaced.
 func newSession(subscription string, rg string, scaleSet string) (*azureSession, error) {
 	authorizer, err := auth.NewAuthorizerFromCLI()
 	if err != nil {
