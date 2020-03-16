@@ -5,20 +5,18 @@ import (
 	"math"
 	"os"
 	"sync"
-
-	"github.com/spf13/cobra"
+	"time"
 
 	"github.com/Azure/azure-sdk-for-go/services/compute/mgmt/2019-07-01/compute"
 	"github.com/Azure/go-autorest/autorest"
 	"github.com/Azure/go-autorest/autorest/azure/auth"
 	"github.com/Azure/go-autorest/autorest/to"
 	log "github.com/sirupsen/logrus"
+	"github.com/spf13/cobra"
 )
 
-// Context is currently unused, since we don't really need to short-circuit
-// any async calls. For now, we'll tie it to a single global root.
-var (
-	ctx = context.Background()
+const (
+	timeoutMinutes = 20
 )
 
 type azureSession struct {
@@ -49,7 +47,7 @@ func (s *azureSession) getVMSSVMClient() compute.VirtualMachineScaleSetVMsClient
 //
 // Returns a slice of futures, which we can optionally await to block further
 // operations until we know the operations have completed.
-func (s *azureSession) setVMProtection(protect bool) ([]compute.VirtualMachineScaleSetVMsUpdateFuture, error) {
+func (s *azureSession) setVMProtection(ctx context.Context, protect bool) ([]compute.VirtualMachineScaleSetVMsUpdateFuture, error) {
 	var futures []compute.VirtualMachineScaleSetVMsUpdateFuture
 	var filter string
 
@@ -98,34 +96,49 @@ func (s *azureSession) setVMProtection(protect bool) ([]compute.VirtualMachineSc
 // spawns a goroutine to poll for success on each. Upon completion
 // of each, logs the modified VM's resource name. Upon completion
 // of all futures, returns.
-func (s *azureSession) awaitVMFutures(futures []compute.VirtualMachineScaleSetVMsUpdateFuture) error {
+func (s *azureSession) awaitVMFutures(ctx context.Context, futures []compute.VirtualMachineScaleSetVMsUpdateFuture) error {
 	var wg sync.WaitGroup
+	var err error
+	e := make(chan error, 1)
+
+	// 'Fork' the upstream timed context.
+	// If the upstream context is canceled, these will die, too.
+	// Otherwise, an error in the 'inner' context will cancel the
+	// other API calls and pass the error out via channel.
+	subCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
 
 	for _, future := range futures {
 		client := s.getVMSSVMClient()
 
 		wg.Add(1)
-		go func(ctx context.Context, client compute.VirtualMachineScaleSetVMsClient, future compute.VirtualMachineScaleSetVMsUpdateFuture) {
+		go func(client compute.VirtualMachineScaleSetVMsClient, future compute.VirtualMachineScaleSetVMsUpdateFuture) {
 			defer wg.Done()
 
-			err := future.WaitForCompletionRef(ctx, client.Client)
-			if err != nil {
-				log.Fatal(err)
+			innerErr := future.WaitForCompletionRef(subCtx, client.Client)
+			if innerErr != nil {
+				e <- innerErr
+				cancel()
 				return
 			}
 
-			res, err := future.Result(client)
-			if err != nil {
-				log.Fatal(err)
+			res, innerErr := future.Result(client)
+			if innerErr != nil {
+				e <- innerErr
+				cancel()
 				return
 			}
 
 			log.Infof("Modified VM: %s", *res.Name)
-		}(ctx, client, future)
+		}(client, future)
 	}
 
 	wg.Wait()
-	return nil
+	if subCtx.Err() != nil {
+		err = <-e
+	}
+	close(e)
+	return err // Default nil if the channel was empty
 }
 
 // Adjusts the desired capacity of the chosen scale set by a given factor.
@@ -133,7 +146,7 @@ func (s *azureSession) awaitVMFutures(futures []compute.VirtualMachineScaleSetVM
 //
 // Instances will not report success until VM Extensions scripts have returned
 // with an exit code of 0.
-func (s *azureSession) scaleVMSSByFactor(factor float64) error {
+func (s *azureSession) scaleVMSSByFactor(ctx context.Context, factor float64) error {
 	client := s.getVMSSClient()
 
 	scaleSet, err := client.Get(ctx, s.ResourceGroupName, s.ScaleSetName)
@@ -191,6 +204,10 @@ func newSession(subscription string, rg string, scaleSet string) (*azureSession,
 func Run(cmd *cobra.Command, args []string) {
 	log.Info("Initializing Cluster Blue/Green Upgrade")
 
+	// Maybe we should let users override the timeout with a CLI flag?
+	ctx, cancel := context.WithTimeout(context.Background(), timeoutMinutes*time.Minute)
+	defer cancel() // In the event we return/exit early, stop all children of this context
+
 	sess, err := newSession(
 		cmd.Flags().Lookup("subscription-id").Value.String(),
 		cmd.Flags().Lookup("resource-group").Value.String(),
@@ -201,7 +218,7 @@ func Run(cmd *cobra.Command, args []string) {
 		os.Exit(1)
 	}
 
-	if err = sess.scaleVMSSByFactor(2); err != nil {
+	if err = sess.scaleVMSSByFactor(ctx, 2); err != nil {
 		log.Fatal(err)
 		os.Exit(1)
 	}
@@ -209,31 +226,31 @@ func Run(cmd *cobra.Command, args []string) {
 	log.Info("Waiting for new instances to reach Running state...")
 
 	// Protect newly-created instances
-	scaleOutFutures, err := sess.setVMProtection(true)
+	scaleOutFutures, err := sess.setVMProtection(ctx, true)
 	if err != nil {
 		log.Fatal(err)
 		os.Exit(1)
 	}
 
-	if err = sess.awaitVMFutures(scaleOutFutures); err != nil {
+	if err = sess.awaitVMFutures(ctx, scaleOutFutures); err != nil {
 		log.Fatal(err)
 		os.Exit(1)
 	}
 
 	// Halve VMSS Capacity
-	if err = sess.scaleVMSSByFactor(0.5); err != nil {
+	if err = sess.scaleVMSSByFactor(ctx, 0.5); err != nil {
 		log.Fatal(err)
 		os.Exit(1)
 	}
 
 	// Un-protect instances
-	scaleInFutures, err := sess.setVMProtection(false)
+	scaleInFutures, err := sess.setVMProtection(ctx, false)
 	if err != nil {
 		log.Fatal(err)
 		os.Exit(1)
 	}
 
-	if err = sess.awaitVMFutures(scaleInFutures); err != nil {
+	if err = sess.awaitVMFutures(ctx, scaleInFutures); err != nil {
 		log.Fatal(err)
 		os.Exit(1)
 	}
