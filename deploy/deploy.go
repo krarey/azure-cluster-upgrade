@@ -76,7 +76,7 @@ func (s *azureSession) setVMProtection(ctx context.Context, protect bool) ([]com
 		}
 
 		future, err := client.Update(
-			context.Background(),
+			ctx,
 			s.ResourceGroupName,
 			s.ScaleSetName,
 			*vm.InstanceID,
