@@ -14,6 +14,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GOARCH: amd64
           GOOS: linux
+          CGO_ENABLED: "0"
   release-darwin-amd64:
     name: release darwin/amd64
     runs-on: ubuntu-latest
