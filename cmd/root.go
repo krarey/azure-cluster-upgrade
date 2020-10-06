@@ -36,6 +36,7 @@ func init() {
 	rootCmd.Flags().StringP("subscription-id", "s", "", "Subscription ID")
 	rootCmd.Flags().StringP("resource-group", "r", "", "Resource Group name")
 	rootCmd.Flags().StringP("vm-scale-set", "v", "", "Virtual Machine Scale Set name")
+	rootCmd.Flags().Bool("skip-health-check", false, "Skip testing instance health checks")
 
 	rootCmd.MarkFlagRequired("subscription-id")
 	rootCmd.MarkFlagRequired("resource-group")

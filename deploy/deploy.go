@@ -3,7 +3,6 @@ package deploy
 import (
 	"context"
 	"math"
-	"os"
 	"sync"
 	"time"
 
@@ -55,12 +54,12 @@ func (s *azureSession) setVMProtection(ctx context.Context, protect bool) ([]com
 
 	if protect {
 		filter = "properties/latestModelApplied eq true"
-		log.Info("Applying scale-in protection to new instances...")
+		log.Info("Applying scale-in protection to new instances")
 	} else {
 		// Leave this defaulted to an empty string for now
 		// This will un-protect ALL members of the VMSS upon completion
 		// filter = "properties/latestModelApplied eq false"
-		log.Info("Removing scale-in protection from Scale Set instances...")
+		log.Info("Removing scale-in protection from Scale Set instances")
 	}
 
 	for vms, err := client.ListComplete(ctx, s.ResourceGroupName, s.ScaleSetName, filter, "", ""); vms.NotDone(); err = vms.Next() {
@@ -157,7 +156,7 @@ func (s *azureSession) scaleVMSSByFactor(ctx context.Context, factor float64) er
 	// Ick
 	newCapacity := int64(math.Floor(float64(*scaleSet.Sku.Capacity) * factor))
 
-	log.Infof("Scaling VMSS %s to %d instances...", *scaleSet.Name, newCapacity)
+	log.Infof("Scaling VMSS %s to %d instances", *scaleSet.Name, newCapacity)
 
 	future, err := client.Update(
 		ctx,
@@ -180,6 +179,47 @@ func (s *azureSession) scaleVMSSByFactor(ctx context.Context, factor float64) er
 		return err
 	}
 
+	return nil
+}
+
+func (s *azureSession) instancesNeedUpgrade(ctx context.Context) (bool, error) {
+	client := s.getVMSSVMClient()
+	const filter string = "properties/latestModelApplied eq false"
+
+	vms, err := client.ListComplete(ctx, s.ResourceGroupName, s.ScaleSetName, filter, "", "")
+	if err != nil {
+		return false, err
+	}
+	return vms.NotDone(), nil
+}
+
+func (s *azureSession) awaitInstanceHealthChecks(ctx context.Context) error {
+	client := s.getVMSSVMClient()
+	const healthy string = "HealthState/healthy"
+
+	log.Info("Waiting for instance health checks to pass")
+	// Rely on the context timeout to kill this if we run too long
+	for true {
+		instanceUnhealthy := false
+		for vms, err := client.ListComplete(ctx, s.ResourceGroupName, s.ScaleSetName, "", "", "instanceView"); vms.NotDone(); err = vms.Next() {
+			if err != nil {
+				return err
+			}
+
+			vm := vms.Value()
+			if *vm.InstanceView.VMHealth.Status.Code != healthy {
+				instanceUnhealthy = true
+				break
+			}
+		}
+
+		if instanceUnhealthy {
+			log.Info("VM instances do not yet report healthy. Backing off and retrying in 30 seconds.")
+			time.Sleep(30 * time.Second)
+		} else {
+			break
+		}
+	}
 	return nil
 }
 
@@ -215,43 +255,52 @@ func Run(cmd *cobra.Command, args []string) {
 	)
 	if err != nil {
 		log.Fatal(err)
-		os.Exit(1)
+	}
+
+	cont, err := sess.instancesNeedUpgrade(ctx)
+	if err != nil {
+		log.Fatal(err)
+	} else if !cont {
+		log.Info("All VMs report up-to-date. Nothing to do.")
+		return
 	}
 
 	if err = sess.scaleVMSSByFactor(ctx, 2); err != nil {
 		log.Fatal(err)
-		os.Exit(1)
 	}
 
-	log.Info("Waiting for new instances to reach Running state...")
+	skip, _ := cmd.Flags().GetBool("skip-health-check")
+	if !skip {
+		err = sess.awaitInstanceHealthChecks(ctx)
+		if err != nil {
+			log.Fatal(err)
+		}
+	} else {
+		log.Warn("Health checks skipped by user")
+	}
 
 	// Protect newly-created instances
 	scaleOutFutures, err := sess.setVMProtection(ctx, true)
 	if err != nil {
 		log.Fatal(err)
-		os.Exit(1)
 	}
 
 	if err = sess.awaitVMFutures(ctx, scaleOutFutures); err != nil {
 		log.Fatal(err)
-		os.Exit(1)
 	}
 
 	// Halve VMSS Capacity
 	if err = sess.scaleVMSSByFactor(ctx, 0.5); err != nil {
 		log.Fatal(err)
-		os.Exit(1)
 	}
 
 	// Un-protect instances
 	scaleInFutures, err := sess.setVMProtection(ctx, false)
 	if err != nil {
 		log.Fatal(err)
-		os.Exit(1)
 	}
 
 	if err = sess.awaitVMFutures(ctx, scaleInFutures); err != nil {
 		log.Fatal(err)
-		os.Exit(1)
 	}
 }
