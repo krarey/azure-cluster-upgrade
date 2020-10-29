@@ -1,8 +1,6 @@
 package cmd
 
 import (
-	"os"
-
 	"github.com/krarey/azure-cluster-upgrade/deploy"
 	log "github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
@@ -28,7 +26,6 @@ to its original value.`,
 func Execute() {
 	if err := rootCmd.Execute(); err != nil {
 		log.Fatal(err)
-		os.Exit(1)
 	}
 }
 
