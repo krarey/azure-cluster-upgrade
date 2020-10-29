@@ -20,8 +20,12 @@ jobs:
           release_name: Release ${{ github.ref }}
           draft: false
           prerelease: false
+      - name: Get Release Version
+        id: get_version
+        run: echo ::set-output name=release_version::${GITHUB_REF/refs\/tags\//}
     outputs:
       upload_url: ${{ steps.create_release.outputs.upload_url }}
+      release_version: ${{ steps.get_version.outputs.release_version }}
   build-linux-amd64:
     name: Build Linux/amd64
     runs-on: ubuntu-latest
@@ -29,9 +33,6 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v2
-      - name: Get Release Version
-        id: get_version
-        run: echo ::set-output name=release_version::${GITHUB_REF/refs\/tags\//}
       - name: Setup Golang Environment
         uses: actions/setup-go@v2
         with:
@@ -51,7 +52,7 @@ jobs:
         with:
           upload_url: ${{ needs.create-release.outputs.upload_url }}
           asset_path: ./artifact.zip
-          asset_name: azure-cluster-upgrade_${{ steps.get_version.outputs.release_version }}_linux_amd64.zip
+          asset_name: azure-cluster-upgrade_${{ needs.create-release.outputs.release_version }}_linux_amd64.zip
           asset_content_type: application/zip
   build-darwin-amd64:
     name: Build Darwin/amd64
@@ -78,7 +79,7 @@ jobs:
         with:
           upload_url: ${{ needs.create-release.outputs.upload_url }}
           asset_path: ./artifact.zip
-          asset_name: azure-cluster-upgrade_${{ steps.get_version.outputs.release_version }}_darwin_amd64.zip
+          asset_name: azure-cluster-upgrade_${{ needs.create-release.outputs.release_version }}_darwin_amd64.zip
           asset_content_type: application/zip
   build-windows-amd64:
     name: Build Windows/amd64
@@ -105,5 +106,5 @@ jobs:
         with:
           upload_url: ${{ needs.create-release.outputs.upload_url }}
           asset_path: ./artifact.zip
-          asset_name: azure-cluster-upgrade_${{ steps.get_version.outputs.release_version }}_windows_amd64.zip
+          asset_name: azure-cluster-upgrade_${{ needs.create-release.outputs.release_version }}_windows_amd64.zip
           asset_content_type: application/zip
