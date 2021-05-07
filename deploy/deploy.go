@@ -201,7 +201,7 @@ func (s *azureSession) awaitInstanceHealthChecks(ctx context.Context) error {
 	// Rely on the context timeout to kill this if we run too long
 	for true {
 		instanceUnhealthy := false
-		for vms, err := client.ListComplete(ctx, s.ResourceGroupName, s.ScaleSetName, "", "", "instanceView"); vms.NotDone(); err = vms.Next() {
+		for vms, err := client.ListComplete(ctx, s.ResourceGroupName, s.ScaleSetName, "properties/latestModelApplied eq true", "", "instanceView"); vms.NotDone(); err = vms.Next() {
 			if err != nil {
 				return err
 			}
